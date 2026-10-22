@@ -1,0 +1,802 @@
+{
+  "name": "CRM Lead Router",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 15,
+              "unit": "minutes"
+            },
+            {
+              "minute": 15
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI",
+          "mode": "list",
+          "cachedResultName": "Lead gen",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "LEAD_GEN",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit#gid=0"
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "id": "f9f11157-41c1-4903-94ec-6d75c618a594",
+      "name": "Google Sheets Trigger",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        -704,
+        -16
+      ],
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "OJl3NQ1WhqZd8VXH",
+          "name": "Google Sheets Trigger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"hotThreshold\": 80,\n  \"warmThreshold\": 40,\n  \"reviewsTiers\": [[100, 45], [30, 20]],\n  \"ratingTiers\": [[4.5, 45], [3.5, 20]],\n  \"tldWhitelist\": \"com,net,org,co,io,ai,info,biz,au,uk,us,ca,nz\"\n}",
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "6475abb5-d027-4922-b025-c6a5db848100",
+      "name": "Edit Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -528,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst cfg = items[0]?.json || {};\n\nconst hot = Number(cfg.hotThreshold);\nconst warm = Number(cfg.warmThreshold);\nconst tlds = String(cfg.tldWhitelist || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);\nconst reviewsTiers = [...(cfg.reviewsTiers || [])].sort((a, b) => b[0] - a[0]);\nconst ratingTiers = [...(cfg.ratingTiers || [])].sort((a, b) => b[0] - a[0]);\n\nconst prefixes = ['info', 'sales', 'admin', 'contact', 'hello', 'enquiries', 'enquiry', 'reception', 'office', 'mail', 'support', 'bookings', 'accounts'];\nconst emailRe = /^[a-z0-9._%+-]+@[a-z0-9-]+(\\.[a-z0-9-]+)*\\.[a-z]{2,}$/i;\n\n// Normalise header names: \"Email \" -> \"email\", \"Website`\" -> \"website\"\nfunction norm(row) {\n  const o = {};\n  for (const k in row) {\n    o[k.replace(/[^A-Za-z0-9 ]/g, '').trim().toLowerCase()] = row[k];\n  }\n  return o;\n}\n\n// Split multi-email cells, fix \"20info@\" artifacts, validate format and TLD\nfunction cleanEmails(raw) {\n  const list = String(raw || '').split(/[,;\\s]+/).map(e => e.trim().toLowerCase()).filter(Boolean);\n  const out = [];\n  for (let e of list) {\n    e = e.replace(/^mailto:/, '').replace(/^%20/, '');\n    const m = e.match(/^20(.+)@/);\n    if (m && prefixes.some(p => m[1].startsWith(p))) e = e.slice(2);\n    if (!emailRe.test(e)) continue;\n    const tld = e.split('.').pop();\n    if (!tlds.includes(tld)) continue;\n    out.push(e);\n  }\n  return out;\n}\n\nfunction points(value, tiers) {\n  for (const [min, pts] of tiers) {\n    if (value >= min) return pts;\n  }\n  return 0;\n}\n\nconst processedAt = new Date().toISOString();\nconst executionId = String($execution.id);\nconst seen = new Set();\nconst results = [];\n\nfor (const item of items) {\n  const r = norm(item.json);\n  const mapsLink = String(r['maps link'] || '').trim();\n\n  // Skip blank rows, already-processed rows, and duplicates in this batch\n  if (!mapsLink) continue;\n  const prior = String(r['status'] || '').trim().toLowerCase();\n  if (prior === 'scored' || prior === 'pushed') continue;\n  if (seen.has(mapsLink)) continue;\n  seen.add(mapsLink);\n\n  const reviews = Number(String(r['reviews']).replace(/,/g, ''));\n  const rating = Number(String(r['rating']).replace(/,/g, ''));\n  const emails = cleanEmails(r['email']);\n  const email = emails[0] || '';\n\n  const base = {\n    name: String(r['name'] || '').trim(),\n    email,\n    phone: String(r['phone'] || '').trim(),\n    website: String(r['website'] || '').trim(),\n    reviews,\n    rating,\n    mapsLink,\n    processedAt,\n    executionId\n  };\n\n  // Validation gate: numeric reviews and rating are required\n  if (r['reviews'] === '' || r['rating'] === '' || Number.isNaN(reviews) || Number.isNaN(rating)) {\n    results.push({ json: { ...base, score: '', tier: '', status: 'Failed', error: 'Invalid or missing Reviews/Rating' } });\n    continue;\n  }\n\n  const score = points(reviews, reviewsTiers) + points(rating, ratingTiers);\n\n  // Email gate: no valid email means the lead can never rise above Cold\n  let tier = 'Cold';\n  if (email && score >= hot) tier = 'Hot';\n  else if (email && score >= warm) tier = 'Warm';\n\n  results.push({ json: { ...base, score, tier, status: 'Scored', error: '' } });\n}\n\nreturn results;"
+      },
+      "id": "391ad785-31a7-418e-884e-9c4fc5dbc7a9",
+      "name": "Score and Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI",
+          "mode": "list",
+          "cachedResultName": "Lead gen",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "LEAD_GEN",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Score": "={{ $json.score }}",
+            "Processed_At": "={{ $json.processedAt }}",
+            "Execution_ID": "={{ $json.executionId }}",
+            "Error": "={{ $json.error }}",
+            "Status": "={{ $json.status }}",
+            "Tier": "={{ $json.tier }}",
+            "Maps Link": "={{ $json.mapsLink }}"
+          },
+          "matchingColumns": [
+            "Maps Link"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Website`",
+              "displayName": "Website`",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Email ",
+              "displayName": "Email ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Reviews",
+              "displayName": "Reviews",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Rating ",
+              "displayName": "Rating ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Copyright Year",
+              "displayName": "Copyright Year",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Maps Link",
+              "displayName": "Maps Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Date Added",
+              "displayName": "Date Added",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Score",
+              "displayName": "Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tier",
+              "displayName": "Tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Processed_At",
+              "displayName": "Processed_At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Execution_ID",
+              "displayName": "Execution_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Error",
+              "displayName": "Error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "d39bfee6-b4a6-4700-a512-36db84e84108",
+      "name": "Update row in sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -208,
+        -16
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "iUum7TGMR7qcb2OJ",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a1e72c98-e7fd-4ac5-b97b-bd29c9ac5570",
+              "leftValue": "={{ $('Score and Validate').item.json.tier }}",
+              "rightValue": "Hot",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4fc98614-6e8f-473c-b5e2-788f4c048fd2",
+      "name": "Hot leads reach the CRM",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -48,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "email": "={{ $('Score and Validate').item.json.email }}",
+        "additionalFields": {
+          "companyName": "={{ $('Score and Validate').item.json.name }}",
+          "phoneNumber": "={{ $('Score and Validate').item.json.phone }}",
+          "websiteUrl": "={{ $('Score and Validate').item.json.website }}"
+        },
+        "options": {
+          "resolveData": false
+        }
+      },
+      "id": "19640558-ca12-4d57-b671-7b831a254226",
+      "name": "Push to HubSpot",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.2,
+      "position": [
+        160,
+        -112
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "hubspotOAuth2Api": {
+          "id": "MaSIa9PErVqyzkAP",
+          "name": "HubSpot account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI",
+          "mode": "list",
+          "cachedResultName": "Lead gen",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 318312529,
+          "mode": "list",
+          "cachedResultName": "TEST_LEADS",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit#gid=318312529"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Maps Link": "={{ $('Score and Validate').item.json.mapsLink }}",
+            "Status": "Pushed"
+          },
+          "matchingColumns": [
+            "Maps Link"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Website`",
+              "displayName": "Website`",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Email ",
+              "displayName": "Email ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Reviews",
+              "displayName": "Reviews",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Rating ",
+              "displayName": "Rating ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Copyright Year",
+              "displayName": "Copyright Year",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Maps Link",
+              "displayName": "Maps Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Date Added",
+              "displayName": "Date Added",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Score",
+              "displayName": "Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Tier",
+              "displayName": "Tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Processed_At",
+              "displayName": "Processed_At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Execution_ID",
+              "displayName": "Execution_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "Error",
+              "displayName": "Error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "254b3fdb-60ce-4e9a-b014-d5c42387edcc",
+      "name": "Mark Pushed",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        368,
+        -128
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "iUum7TGMR7qcb2OJ",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "YOUR_CHAT_ID": "1219749494",
+        "text": "=🔥 Hot lead pushed to HubSpot\n\nName: {{ String($('Score and Validate').item.json.name ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}\nScore: {{ $('Score and Validate').item.json.score }}\nEmail: {{ String($('Score and Validate').item.json.email ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}\nMaps: {{ String($('Score and Validate').item.json.mapsLink ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "e460aa27-c4f1-427c-bc04-0bcc4bf71e03",
+      "name": "Send a text message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        544,
+        -128
+      ],
+      "webhookId": "0fb26a8b-87a3-4542-868e-57f893afe498",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "4l1ak2MX3lXeswz8",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI",
+          "mode": "list",
+          "cachedResultName": "Lead gen",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1785549050,
+          "mode": "list",
+          "cachedResultName": "Sheet5",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit#gid=1785549050"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Maps Link": "={{ $json['Maps Link'] }}",
+            "Name": "={{ $('Score and Validate').item.json.name }}",
+            "Email": "={{ $('Score and Validate').item.json.email }}",
+            "Error ": "={{ $json.error }}",
+            "Failed_At": "={{ $now.toISO() }}",
+            "Execution_ID": "={{ $execution.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Maps Link",
+              "displayName": "Maps Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Error ",
+              "displayName": "Error ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Failed_At",
+              "displayName": "Failed_At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Execution_ID",
+              "displayName": "Execution_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "3c23d715-e99b-4a2c-a685-3ddc7809cb0d",
+      "name": "Log Failed Lead",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        368,
+        144
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "iUum7TGMR7qcb2OJ",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Google Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Score and Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score and Validate": {
+      "main": [
+        [
+          {
+            "node": "Update row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Hot leads reach the CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hot leads reach the CRM": {
+      "main": [
+        [
+          {
+            "node": "Push to HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push to HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Mark Pushed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Failed Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Pushed": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "9Ae33Ebhah6qsHp0",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "398bce0e-4528-4a2e-8887-6fed41063f9b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "291b89e6fd8d33ce95bdded601e4c671203862114b5a69f7cacc9ac43ff189ec"
+  },
+  "nodeGroups": [],
+  "id": "uUbEcRhFjVD1wvh7",
+  "tags": []
+}

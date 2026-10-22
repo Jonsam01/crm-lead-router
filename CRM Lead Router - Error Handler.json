@@ -1,0 +1,95 @@
+{
+  "name": "CRM Lead Router - Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -352,
+        -64
+      ],
+      "id": "91211c26-d815-4c53-80f3-376ef7bf4201",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "=🚨 Workflow crashed Workflow: {{ $json.workflow.name }} \nFailed node: {{ $json.execution.lastNodeExecuted }} \nError: {{ $json.execution.error.message }} \nExecution: {{ $json.execution.id }} \nOpen: {{ $json.execution.url }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -160,
+        -64
+      ],
+      "id": "7e2c0281-df11-4261-9368-f71db592a036",
+      "name": "Alert Crash.",
+      "webhookId": "33c3b137-6159-40a3-b10c-9c43bdf5c2b3",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "4l1ak2MX3lXeswz8",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Error Trigger": [
+      {
+        "json": {
+          "execution": {
+            "id": 231,
+            "url": "https://smartbuild01.app.n8n.cloud/execution/workflow/1/231",
+            "retryOf": "34",
+            "error": {
+              "message": "Example Error Message",
+              "stack": "Stacktrace"
+            },
+            "lastNodeExecuted": "Node With Error",
+            "mode": "manual"
+          },
+          "workflow": {
+            "id": "1",
+            "name": "Example Workflow"
+          }
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Alert Crash.",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "aea846df-93c6-4a45-a6cc-fc5bb2e12702",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "291b89e6fd8d33ce95bdded601e4c671203862114b5a69f7cacc9ac43ff189ec"
+  },
+  "nodeGroups": [],
+  "id": "9Ae33Ebhah6qsHp0",
+  "tags": []
+}

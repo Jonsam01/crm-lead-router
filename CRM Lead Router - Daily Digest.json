@@ -1,0 +1,148 @@
+{
+  "name": "CRM Lead Router - Daily Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -272,
+        16
+      ],
+      "id": "98b753ec-8608-479a-855e-3d54e35c8414",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI",
+          "mode": "list",
+          "cachedResultName": "Lead gen",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "LEAD_GEN",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1HNi6OPH3MGFzHpkzeViszdQ72Uf40tQBrW5F50-gXFI/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -80,
+        16
+      ],
+      "id": "3c6f7712-6f60-4ecc-82b0-ac627595a62a",
+      "name": "Read Leads",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "iUum7TGMR7qcb2OJ",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst cutoff = Date.now() - 24 * 60 * 60 * 1000;\n\nconst stats = { processed: 0, hotPushed: 0, hotPending: 0, warm: 0, cold: 0, failed: 0 };\nconst hotNames = [];\n\nfor (const r of rows) {\n  if (!r['Maps Link']) continue;\n\n  const status = String(r['Status'] || '').trim().toLowerCase();\n  if (!['scored', 'pushed', 'failed'].includes(status)) continue;\n\n  const ts = Date.parse(r['Processed_At']);\n  if (Number.isNaN(ts) || ts < cutoff) continue;\n\n  stats.processed++;\n\n  if (status === 'failed') {\n    stats.failed++;\n    continue;\n  }\n\n  const tier = String(r['Tier'] || '').trim();\n  if (tier === 'Hot' && status === 'pushed') {\n    stats.hotPushed++;\n    hotNames.push(r['Name']);\n  } else if (tier === 'Hot') {\n    stats.hotPending++;\n  } else if (tier === 'Warm') {\n    stats.warm++;\n  } else if (tier === 'Cold') {\n    stats.cold++;\n  }\n}\n\nconst date = new Date().toISOString().slice(0, 10);\nconst lines = [\n  `📊 CRM Lead Router digest (${date}, last 24h)`,\n  `Processed: ${stats.processed}`,\n  `🔥 Hot pushed to HubSpot: ${stats.hotPushed}`,\n  `Warm: ${stats.warm}`,\n  `Cold: ${stats.cold}`,\n  `⚠️ Hot waiting to push: ${stats.hotPending}`,\n  `❌ Failed validation: ${stats.failed}`\n];\nif (hotNames.length) lines.push('', 'Hot leads:', ...hotNames.map(n => `- ${n}`));\nif (!stats.processed) lines.push('', 'No leads were processed in the last 24 hours.');\n\nreturn [{ json: { ...stats, message: lines.join('\\n') } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        16
+      ],
+      "id": "05bfa5e0-7b84-4d90-838e-d113d9636607",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "YOUR_CHAT_ID": "1219749494",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        368,
+        16
+      ],
+      "id": "d033627d-e8b3-4eff-947f-9d395f1d941b",
+      "name": "Send Digest",
+      "webhookId": "fe4c7200-f875-4ece-9b3f-55d702e47a59",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "4l1ak2MX3lXeswz8",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Leads": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Send Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "d199880e-1033-4941-924c-dedb4c541f1c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "291b89e6fd8d33ce95bdded601e4c671203862114b5a69f7cacc9ac43ff189ec"
+  },
+  "nodeGroups": [],
+  "id": "07uqou6NBYe4mqJc",
+  "tags": []
+}
